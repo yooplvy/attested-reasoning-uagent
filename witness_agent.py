@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from typing import List
 from uuid import uuid4
 
+import time
+
 import requests
 from uagents import Agent, Context, Model, Protocol
 from uagents_core.contrib.protocols.chat import (
@@ -41,26 +43,34 @@ T_OPEN = "0xf34f0495589db8170fe21d2615f53922140e4455e7861f6bb2e79bcc9f652db3"
 #         WitnessOpened(bytes32,address,bytes32,int256,uint8,uint8,uint64,bytes32)
 T_CLOSE = "0x389833045d479cf65f692b6e9e61088c20a43323050342b58adc1c0525ca5ec9"
 #         WitnessClosed(bytes32,int256,uint64,bytes32,int256,uint8)
+# NOTE: deploy with a keyed provider (e.g. Alchemy) as the FIRST entry — free
+# public gateways cap or block eth_getLogs. llamarpc + polygon-rpc.com removed
+# 2026-06-11: confirmed dead ("Max retries" / "tenant disabled").
 RPCS = ["https://polygon-bor-rpc.publicnode.com",
         "https://1rpc.io/matic",
-        "https://polygon.llamarpc.com",
         "https://polygon.meowrpc.com",
-        "https://polygon-rpc.com",
         "https://polygon.drpc.org"]
 CHUNK = 4500            # blocks per eth_getLogs call (strictest free tiers cap ~5k)
 CHUNKS_PER_RUN = 12     # max chunks each interval tick (be a polite client)
 
 
+_DIAG = {"log": None}   # set to ctx.logger by _scan so failures name their provider
+
+
 def _rpc(method, params):
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     for url in RPCS:
+        host = url.split("/")[2]
         try:
             r = requests.post(url, json=payload, timeout=15)
             d = r.json()
             if "result" in d and d["result"] is not None:
                 return d["result"]
-        except Exception:
-            continue
+            if _DIAG["log"] and method == "eth_getLogs":
+                _DIAG["log"].warning("[rpc] %s -> %s" % (host, str(d.get("error"))[:100]))
+        except Exception as e:
+            if _DIAG["log"] and method == "eth_getLogs":
+                _DIAG["log"].warning("[rpc] %s -> EXC %s" % (host, str(e)[:70]))
     return None
 
 
@@ -72,6 +82,7 @@ def _latest_block():
 def _scan(ctx: Context):
     """Walk forward from the stored checkpoint, up to CHUNKS_PER_RUN chunks.
     Stores: wa_last (last scanned block), wa_open, wa_close, wa_recent (list)."""
+    _DIAG["log"] = ctx.logger
     latest = _latest_block()
     if latest is None:
         ctx.logger.warning("[witness] all RPCs unreachable; will retry")
@@ -128,6 +139,14 @@ def _scan(ctx: Context):
         recent = recent[-12:]
         last = to
         chunks += 1
+        # polite pacing: free-tier providers throttle bursts; a rate-limit response
+        # must not be mistaken for a range refusal (that is what shrinks the chunk)
+        time.sleep(0.6)
+    else:
+        # clean run (no refusal): let the chunk recover slowly toward CHUNK_MAX
+        if chunks and chunk < 9500:
+            chunk = min(9500, int(chunk * 1.5))
+            ctx.storage.set("wa_chunk", chunk)
     ctx.storage.set("wa_last", last)
     ctx.storage.set("wa_open", opened)
     ctx.storage.set("wa_close", closed)
