@@ -42,10 +42,13 @@ T_OPEN = "0xf34f0495589db8170fe21d2615f53922140e4455e7861f6bb2e79bcc9f652db3"
 T_CLOSE = "0x389833045d479cf65f692b6e9e61088c20a43323050342b58adc1c0525ca5ec9"
 #         WitnessClosed(bytes32,int256,uint64,bytes32,int256,uint8)
 RPCS = ["https://polygon-bor-rpc.publicnode.com",
+        "https://1rpc.io/matic",
+        "https://polygon.llamarpc.com",
+        "https://polygon.meowrpc.com",
         "https://polygon-rpc.com",
         "https://polygon.drpc.org"]
-CHUNK = 9000            # blocks per eth_getLogs call (free-tier safe)
-CHUNKS_PER_RUN = 10     # max chunks each interval tick (be a polite client)
+CHUNK = 4500            # blocks per eth_getLogs call (strictest free tiers cap ~5k)
+CHUNKS_PER_RUN = 12     # max chunks each interval tick (be a polite client)
 
 
 def _rpc(method, params):
@@ -77,9 +80,13 @@ def _scan(ctx: Context):
     opened = ctx.storage.get("wa_open") or 0
     closed = ctx.storage.get("wa_close") or 0
     recent = ctx.storage.get("wa_recent") or []
+    # ADAPTIVE chunking: providers cap eth_getLogs ranges anywhere from 50 to
+    # 10k blocks. Start optimistic; shrink on refusal; floor at 45. The stored
+    # size survives restarts so the agent converges on what its network allows.
+    chunk = int(ctx.storage.get("wa_chunk") or CHUNK)
     chunks = 0
     while last < latest and chunks < CHUNKS_PER_RUN:
-        frm, to = last + 1, min(last + CHUNK, latest)
+        frm, to = last + 1, min(last + chunk, latest)
         logs = _rpc("eth_getLogs", [{
             "address": MASIE, "fromBlock": hex(frm), "toBlock": hex(to),
             "topics": [[T_OPEN, T_CLOSE]],
@@ -98,7 +105,12 @@ def _scan(ctx: Context):
                     break
                 logs.extend(part)
             if not ok:
-                ctx.logger.warning("[witness] getLogs unavailable %d-%d; pausing" % (frm, to))
+                if chunk > 45:
+                    chunk = max(45, chunk // 3)
+                    ctx.storage.set("wa_chunk", chunk)
+                    ctx.logger.warning("[witness] getLogs refused %d-%d; shrinking chunk to %d and retrying next tick" % (frm, to, chunk))
+                else:
+                    ctx.logger.warning("[witness] getLogs failing even at %d-block chunks - RPC log access blocked from this runtime; stated honestly in replies" % chunk)
                 break
         for lg in logs:
             t0 = (lg.get("topics") or [""])[0]
@@ -121,8 +133,8 @@ def _scan(ctx: Context):
     ctx.storage.set("wa_close", closed)
     ctx.storage.set("wa_recent", recent)
     ctx.storage.set("wa_latest_seen", latest)
-    ctx.logger.info("[witness] synced to %d/%d - open=%d close=%d"
-                    % (last, latest, opened, closed))
+    ctx.logger.info("[witness] synced to %d/%d - open=%d close=%d - chunk=%d"
+                    % (last, latest, opened, closed, chunk))
 
 
 def _summary_dict(ctx: Context):
@@ -218,9 +230,13 @@ chat_proto = Protocol(spec=chat_protocol_spec)
 
 def _chat_answer(ctx: Context, text):
     s = _summary_dict(ctx)
-    cover = ("full history" if s["fully_synced"]
-             else "blocks %d to %d (still backfilling - stated, not hidden)"
-             % (s["synced_from_block"], s["synced_to_block"]))
+    if s["fully_synced"]:
+        cover = "full history"
+    elif s["synced_to_block"] < s["synced_from_block"]:
+        cover = "nothing yet - the log scan has not progressed past the deploy block (RPC log access may be blocked; stated, not hidden)"
+    else:
+        cover = ("blocks %d to %d (still backfilling - stated, not hidden)"
+                 % (s["synced_from_block"], s["synced_to_block"]))
     return ("I serve on-chain trade witnesses from MasieBridge v1.0 (Proof of "
             "Witness, Polygon Mainnet, %s). Scanned %s: %d trades witnessed open, "
             "%d witnessed closed. Every record is irrevocable and verifiable - "
@@ -236,7 +252,21 @@ async def on_chat(ctx: Context, sender: str, msg: ChatMessage):
     await ctx.send(sender, ChatAcknowledgement(
         timestamp=datetime.now(timezone.utc), acknowledged_msg_id=msg.msg_id))
     text = "".join(c.text for c in msg.content if isinstance(c, TextContent))
-    if "recent" in (text or "").lower():
+    t = (text or "").lower()
+    if any(w in t for w in ("built", "purpose", "what are you", "who are you", "about")):
+        answer = ("I am the receipts half of a two-agent pair. My sibling @vpay serves "
+                  "PROMISES: bonded AI reasoning commitments on KommitBridge. I serve "
+                  "RECEIPTS: every leveraged paper trade our engines take is witnessed "
+                  "on-chain at entry and exit on MasieBridge v1.0 (%s, Polygon Mainnet) - "
+                  "irrevocable, anti-backdate, verifiable by anyone with keccak-256. I "
+                  "count only what I have actually scanned and I always state my sync "
+                  "window. Say 'recent' for the latest receipts, or 'summary' for counts."
+                  % MASIE)
+        await ctx.send(sender, ChatMessage(
+            timestamp=datetime.now(timezone.utc), msg_id=uuid4(),
+            content=[TextContent(type="text", text=answer)]))
+        return
+    if "recent" in t:
         recent = (ctx.storage.get("wa_recent") or [])[-5:]
         if recent:
             lines = ["%s %s block %d https://polygonscan.com/tx/%s"
@@ -268,6 +298,6 @@ async def startup(ctx: Context):
     _scan(ctx)
 
 
-@agent.on_interval(period=600.0)
+@agent.on_interval(period=300.0)
 async def tick(ctx: Context):
     _scan(ctx)
