@@ -136,3 +136,24 @@ LICENSE                  MIT
 
 MIT © 2026 EcoVent Africa Limited · Accra, Ghana
 Part of VPAY Genesis — *Adwene di adanseɛ: the reasoning attests itself.*
+
+
+## Second agent: the witness feed (`witness_agent.py`)
+
+Where the attested-reasoning agent serves *promises* (bonded commitments on
+KommitBridge), `witness_agent.py` serves *receipts*: every leveraged paper trade
+is witnessed on-chain at entry and exit on **MasieBridge v1.0** (Proof of
+Witness) at [`0x358c50C1DAe9AD41D0070a3767221F3c191b22F6`](https://polygonscan.com/address/0x358c50c1dae9ad41d0070a3767221f3c191b22f6#code).
+
+Same paste-and-run deployment as the hosted agent. It scans chain logs in
+chunks (free-RPC safe), checkpoints progress in agent storage, and **always
+reports its sync window** — partial coverage is stated, never disguised as a
+total. Protocol: `GetWitnessSummary {}` / `GetRecentWitnesses {n}`, plus
+ASI:One chat.
+
+Verify it yourself:
+
+```bash
+cast logs --address 0x358c50C1DAe9AD41D0070a3767221F3c191b22F6 \
+  --from-block 86969835 --rpc-url https://polygon-bor-rpc.publicnode.com
+```
