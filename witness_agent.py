@@ -50,6 +50,10 @@ RPCS = ["https://polygon-bor-rpc.publicnode.com",
         "https://1rpc.io/matic",
         "https://polygon.meowrpc.com",
         "https://polygon.drpc.org"]
+# Public URL quoted in user-facing "verify yourself" text. NEVER use RPCS[0]
+# there — the first entry may be a keyed provider, and quoting it would leak
+# the API key in every chat reply.
+PUBLIC_VERIFY_RPC = "https://polygon-bor-rpc.publicnode.com"
 CHUNK = 4500            # blocks per eth_getLogs call (strictest free tiers cap ~5k)
 CHUNKS_PER_RUN = 12     # max chunks each interval tick (be a polite client)
 
@@ -263,7 +267,7 @@ def _chat_answer(ctx: Context, text):
             "hash. Ask 'recent' for the latest receipts, or verify yourself: "
             "cast logs --address %s --from-block %d --rpc-url %s"
             % (MASIE, cover, s["witnessed_opened"], s["witnessed_closed"],
-               MASIE, DEPLOY_BLOCK, RPCS[0]))
+               MASIE, DEPLOY_BLOCK, PUBLIC_VERIFY_RPC))
 
 
 @chat_proto.on_message(ChatMessage)
